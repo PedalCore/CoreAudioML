@@ -121,6 +121,130 @@ class SimpleRNN(nn.Module):
             loss = loss_fcn(output, target_data)
         return output, loss
 
+""" 
+Experimental Film conditioning RNN
+"""
+class FiLMSimpleRNN(nn.Module):
+    """
+    Simple RNN with FiLM-style conditioning.
+
+    - Same core as SimpleRNN (GRU/LSTM/Elman + Linear + optional skip)
+    - Extra input 'cond' (B, cond_dim)
+    - Small MLP maps 'cond' -> (gamma, beta) in R^{hidden_size}
+      and applies h' = gamma * h + beta to the recurrent output
+    """
+    def __init__(self,
+                 input_size=1,
+                 output_size=1,
+                 unit_type="LSTM",
+                 hidden_size=32,
+                 skip=1,
+                 bias_fl=True,
+                 num_layers=1,
+                 cond_dim=1,
+                 film_width=64):
+        super(FiLMSimpleRNN, self).__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+        self.hidden_size = hidden_size
+        self.skip = skip
+        self.bias_fl = bias_fl
+        self.num_layers = num_layers
+        self.cond_dim = cond_dim
+        self.film_width = film_width
+
+        # Core recurrent unit (same as SimpleRNN)
+        self.rec = wrapperargs(getattr(nn, unit_type),
+                               [input_size, hidden_size, num_layers])
+        self.lin = nn.Linear(hidden_size, output_size, bias=bias_fl)
+
+        # FiLM MLP: cond (B, cond_dim) -> (gamma, beta) (B, hidden_size)
+        self.film_mlp = nn.Sequential(
+            nn.Linear(cond_dim, film_width),
+            nn.ReLU(),
+            nn.Linear(film_width, 2 * hidden_size)
+        )
+
+        self.save_state = True
+        self.hidden = None
+
+    def forward(self, x, cond):
+        """
+        x:    (T, B, input_size)
+        cond: (B, cond_dim) or (T, B, cond_dim) where the T dimension is constant;
+              we will treat it as (B, cond_dim) and broadcast over T.
+        """
+        # Ensure cond is (B, cond_dim)
+        if cond.dim() == 3:
+            # e.g. (T, B, cond_dim) -> take first timestep
+            cond = cond[0]
+
+        # Compute FiLM parameters
+        film_out = self.film_mlp(cond)                # (B, 2 * hidden_size)
+        gamma, beta = torch.chunk(film_out, 2, dim=-1)  # (B, H), (B, H)
+
+        # Reshape for broadcasting over time dimension T
+        # GRU output: (T, B, H)
+        gamma = gamma.unsqueeze(0)  # (1, B, H)
+        beta = beta.unsqueeze(0)    # (1, B, H)
+
+        if self.skip:
+            # save the residual for the skip connection (same as SimpleRNN)
+            res = x[:, :, 0:self.skip]
+
+            # Recurrent pass
+            x, self.hidden = self.rec(x, self.hidden)  # (T, B, H)
+
+            # FiLM modulation
+            x = gamma * x + beta                       # (T, B, H)
+
+            # Output projection + skip
+            return self.lin(x) + res
+        else:
+            x, self.hidden = self.rec(x, self.hidden)
+            x = gamma * x + beta
+            return self.lin(x)
+
+    def detach_hidden(self):
+        if self.hidden is None:
+            return
+        if isinstance(self.hidden, tuple):
+            self.hidden = tuple([h.clone().detach() for h in self.hidden])
+        else:
+            self.hidden = self.hidden.clone().detach()
+
+    def reset_hidden(self):
+        self.hidden = None
+
+    def save_model(self, file_name, direc=''):
+        if direc:
+            miscfuncs.dir_check(direc)
+
+        model_data = {
+            'model_data': {
+                'model': 'FiLMSimpleRNN',
+                'input_size': self.rec.input_size,
+                'skip': self.skip,
+                'output_size': self.lin.out_features,
+                'unit_type': self.rec._get_name(),
+                'num_layers': self.rec.num_layers,
+                'hidden_size': self.rec.hidden_size,
+                'bias_fl': self.bias_fl,
+                'cond_dim': self.cond_dim,
+                'film_width': self.film_width
+            }
+        }
+
+        if self.save_state:
+            model_state = self.state_dict()
+            for each in model_state:
+                model_state[each] = model_state[each].tolist()
+            model_data['state_dict'] = model_state
+
+        miscfuncs.json_save(model_data, file_name, direc)
+
+
 
 """ 
 Recurrent Neural Network class, blocks is a list of layers, each layer is described by a dictionary, layers can also

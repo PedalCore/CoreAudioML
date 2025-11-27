@@ -372,10 +372,18 @@ class BasicRNNBlock(nn.Module):
 
 
 def load_model(model_data):
-    model_types = {'RecNet': RecNet, 'SimpleRNN': SimpleRNN}
+    model_types = {'RecNet': RecNet, 'SimpleRNN': SimpleRNN, 'FiLMSimpleRNN': FiLMSimpleRNN,}
 
     model_meta = model_data.pop('model_data')
 
+    if model_meta['model'] == 'FiLMSimpleRNN']:
+        network = wrapperkwargs(model_types[model_meta.pop('model')], model_meta)
+         if 'state_dict' in model_data:
+            state_dict = network.state_dict()
+            for each in model_data['state_dict']:
+                state_dict[each] = torch.tensor(model_data['state_dict'][each])
+            network.load_state_dict(state_dict)
+             
     if model_meta['model'] == 'SimpleRNN':
         network = wrapperkwargs(model_types[model_meta.pop('model')], model_meta)
         if 'state_dict' in model_data:
